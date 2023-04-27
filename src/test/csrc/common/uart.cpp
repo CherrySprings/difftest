@@ -17,6 +17,14 @@
 #include "common.h"
 #include "stdlib.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <termios.h>
+
+#define UART_INTERACTIVE
+
 #define QUEUE_SIZE 1024
 static char queue[QUEUE_SIZE] = {};
 static int f = 0, r = 0;
@@ -27,54 +35,47 @@ static void uart_enqueue(char ch) {
     // not full
     queue[r] = ch;
     r = next;
+  } else {
+    printf("UART queue full, dropping character: %ch\n", ch);
   }
 }
 
-static int uart_dequeue(void) {
-  int k = 0;
+static uint8_t uart_dequeue(void) {
+  uint8_t k = 0xff;
   if (f != r) {
     k = queue[f];
     f = (f + 1) % QUEUE_SIZE;
-  } else {
-    static int last = 0;
-    k = "root\n"[last ++];
-    if (last == 5) last = 0;
-    // generate a random key every 1s for pal
-    //k = -1;//"uiojkl"[rand()% 6];
   }
   return k;
 }
 
-uint32_t uptime(void);
-uint8_t uart_getc() {
-  static uint32_t lasttime = 0;
-  uint32_t now = uptime();
+#ifdef UART_INTERACTIVE
+struct termios saved_attributes;
 
-  uint8_t ch = -1;
-  if (now - lasttime > 60 * 1000) {
-    // 1 minute
-    eprintf(ANSI_COLOR_RED "now = %ds\n" ANSI_COLOR_RESET, now / 1000);
-    lasttime = now;
+void *read_input(void *arg) {
+  char c;
+  while (1) {
+    // set terminal attributes to non-blocking mode
+    struct termios new_attributes = saved_attributes;
+    new_attributes.c_cc[VMIN] = 0;
+    new_attributes.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_attributes);
+
+    // read a character from stdin
+    if (read(STDIN_FILENO, &c, 1) > 0) {
+      uart_enqueue(c);
+    }
+
+    // restore terminal attributes
+    tcsetattr(STDIN_FILENO, TCSANOW, &saved_attributes);
   }
-  // if (now > 4 * 3600 * 1000) { // 4 hours
-  //   ch = uart_dequeue();
-  // }
-  return ch;
 }
+#endif
 
-extern "C" void uart_getc_legacy(uint8_t *ch) {
-  static uint32_t lasttime = 0;
-  uint32_t now = uptime();
-
-  *ch = -1;
-  if (now - lasttime > 60 * 1000) {
-    // 1 minute
-    eprintf(ANSI_COLOR_RED "now = %ds\n" ANSI_COLOR_RESET, now / 1000);
-    lasttime = now;
-  }
-  if (now > 4 * 3600 * 1000) { // 4 hours
-    *ch = uart_dequeue();
-  }
+uint8_t uart_getc() {
+  uint8_t ch = uart_dequeue();
+  // printf("uart_getc %c (%d)\n", ch, ch);
+  return ch;
 }
 
 static void preset_input() {
@@ -102,5 +103,15 @@ static void preset_input() {
 }
 
 void init_uart(void) {
+#ifdef UART_INTERACTIVE
+  pthread_t thread;
+
+  // save current terminal attributes
+  tcgetattr(STDIN_FILENO, &saved_attributes);
+
+  // create thread to read input
+  pthread_create(&thread, NULL, read_input, NULL);
+#else
   preset_input();
+#endif
 }
